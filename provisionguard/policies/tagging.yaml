@@ -1,0 +1,12 @@
+# Tagging policy: tags every taggable resource must carry.
+#
+# Tags added by the provider's default_tags count, because the check reads tags_all.
+# Resources that can't carry tags (e.g. route table associations) are skipped automatically.
+
+required_tags:
+  - owner          # who to contact when it breaks
+  - cost-center    # who pays for it
+  - environment    # dev / staging / prod (right-sizing uses it too)
+
+allowed_values:
+  environment: [dev, staging, prod]

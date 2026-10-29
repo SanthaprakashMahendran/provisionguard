@@ -1,0 +1,23 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.9.8",
+  "variables": {"aws_region": {"value": "us-east-1"}},
+  "resource_changes": [
+    {"address": "data.aws_ami.al2023", "mode": "data", "type": "aws_ami", "name": "al2023",
+     "change": {"actions": ["read"], "before": null, "after": {}, "after_unknown": {}}},
+    {"address": "aws_vpc.main", "mode": "managed", "type": "aws_vpc", "name": "main",
+     "change": {"actions": ["create"], "before": null,
+                "after": {"cidr_block": "10.20.0.0/16", "tags_all": {"environment": "dev", "owner": "platform-team", "cost-center": "platform-eng"}},
+                "after_unknown": {"id": true}}},
+    {"address": "aws_instance.this[\"app-1\"]", "mode": "managed", "type": "aws_instance", "name": "this",
+     "change": {"actions": ["create"], "before": null, "after": {"instance_type": "t3.medium", "tags_all": {"environment": "dev"}}, "after_unknown": {"id": true}}},
+    {"address": "aws_instance.this[\"worker\"]", "mode": "managed", "type": "aws_instance", "name": "this",
+     "change": {"actions": ["create"], "before": null, "after": {"instance_type": "m5.2xlarge", "tags_all": {"environment": "dev"}}, "after_unknown": {"id": true}}},
+    {"address": "aws_db_instance.main", "mode": "managed", "type": "aws_db_instance", "name": "main",
+     "change": {"actions": ["create"], "before": null, "after": {"instance_class": "db.m5.large", "multi_az": false}, "after_unknown": {"id": true}}},
+    {"address": "aws_security_group.bastion", "mode": "managed", "type": "aws_security_group", "name": "bastion",
+     "change": {"actions": ["update"], "before": {"name": "old"}, "after": {"name": "new"}, "after_unknown": {}}},
+    {"address": "aws_eip.nat", "mode": "managed", "type": "aws_eip", "name": "nat",
+     "change": {"actions": ["delete", "create"], "before": {}, "after": {}, "after_unknown": {}}}
+  ]
+}

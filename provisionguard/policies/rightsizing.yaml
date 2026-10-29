@@ -1,0 +1,20 @@
+# Right-sizing policy: the largest size each environment may use.
+#
+# "Larger" means "costs more per hour", so a cap like t3.medium also covers
+# other families (a c5.large costs more than a t3.medium, so it's flagged).
+#
+# Environment comes from each resource's `environment` (or `env`) tag.
+# Aliases: development→dev, stage/stg→staging, production/prd→prod.
+
+dev:
+  max_ec2: t3.medium          # EC2 instances and EKS node group instances
+  max_rds: db.t3.medium
+  rds_multi_az: forbidden     # a standby copy doubles the cost; not needed in dev
+
+staging:
+  max_ec2: m5.large
+  max_rds: db.m5.large
+
+prod:
+  # No size cap in prod.
+  rds_multi_az: required      # prod databases must survive an Availability Zone outage

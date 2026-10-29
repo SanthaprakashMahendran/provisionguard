@@ -1,0 +1,27 @@
+# Copy to .github/workflows/terraform-review.yml in the repository that holds your Terraform.
+name: Terraform review
+
+# Runs on every pull request. ProvisionGuard itself skips PRs that change nothing under terraform-dir,
+# policy/ or provisionguard.yaml, so there's no folder to keep in sync here.
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write # post the review comment
+  id-token: write      # log in to AWS through OIDC
+
+concurrency:
+  group: terraform-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: SanthaprakashMahendran/provisionguard@v1
+        with:
+          terraform-dir: infra # your Terraform folder
+          aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
+          claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }} # optional: AI assessment and diagram

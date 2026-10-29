@@ -1,0 +1,219 @@
+name: ProvisionGuard
+description: >-
+  Reviews a Terraform pull request before approval and posts one comment: security, existing infrastructure,
+  service quotas, right-sizing, tagging, cost and an architecture diagram.
+author: Santhaprakash Mahendran
+branding:
+  icon: shield
+  color: blue
+
+inputs:
+  terraform-dir:
+    description: Folder with the Terraform code to review, relative to the repository root.
+    default: infra
+  aws-role-arn:
+    description: >-
+      IAM role to assume through GitHub OIDC (read-only access is enough). Leave empty if an earlier step
+      already configured AWS credentials.
+    default: ""
+  aws-region:
+    description: AWS region for the AWS calls when the Terraform code doesn't set aws_region.
+    default: us-east-1
+  terraform-version:
+    description: Terraform version used for the plan.
+    default: 1.9.8
+  terraform-init-args:
+    description: >-
+      Extra arguments for terraform init, e.g. backend settings. {account_id} is replaced with the AWS account ID,
+      e.g. -backend-config=bucket=tfstate-{account_id}
+    default: ""
+  terraform-plan-args:
+    description: Extra arguments for terraform plan, e.g. -var-file=accounts/prod.tfvars
+    default: ""
+  scanners:
+    description: >-
+      Security scanners to run, comma-separated: checkov, trivy, kics. Empty means security.scanners in
+      provisionguard.yaml, or Checkov.
+    default: ""
+  config:
+    description: Path to the settings file.
+    default: provisionguard.yaml
+  claude-code-oauth-token:
+    description: >-
+      Token from `claude setup-token` (Claude Pro/Max) for the AI assessment and diagram. Without it the review
+      runs without the AI parts.
+    default: ""
+  github-token:
+    description: Token used to post the PR comment.
+    default: ${{ github.token }}
+  skip-unchanged:
+    description: >-
+      Skip the review when the pull request changes nothing under terraform-dir, policy/ or the settings file.
+      Set to false to review every pull request.
+    default: "true"
+  fail-on:
+    description: >-
+      Fail the check on this verdict or worse: never, caution (red) or warning (yellow). With branch protection,
+      caution blocks merging until the review is green or yellow.
+    default: never
+
+outputs:
+  verdict:
+    description: The overall verdict, caution, warning or ok; empty when the review was skipped.
+    value: ${{ steps.review.outputs.verdict }}
+  reviewed:
+    description: true when the review ran, false when it was skipped because nothing relevant changed.
+    value: ${{ steps.changes.outputs.relevant }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install ProvisionGuard
+      shell: bash
+      run: |
+        python -m pip install --quiet "${{ github.action_path }}"
+        mkdir -p "$RUNNER_TEMP/provisionguard"
+
+    # A workflow's paths filter can't use inputs, so the folder check happens here.
+    - name: Check for relevant changes
+      id: changes
+      shell: bash
+      env:
+        TF_DIR: ${{ inputs.terraform-dir }}
+        PROVISIONGUARD_CONFIG: ${{ inputs.config }}
+        PROVISIONGUARD_SKIP_UNCHANGED: ${{ inputs.skip-unchanged }}
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+      run: echo "relevant=$(python -m provisionguard.changes)" >> "$GITHUB_OUTPUT"
+
+    - if: steps.changes.outputs.relevant == 'true'
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ inputs.terraform-version }}
+        terraform_wrapper: false # the wrapper's output would corrupt plan.json
+
+    - if: steps.changes.outputs.relevant == 'true' && inputs.aws-role-arn != ''
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ inputs.aws-role-arn }}
+        aws-region: ${{ inputs.aws-region }}
+
+    - name: Read settings
+      if: steps.changes.outputs.relevant == 'true'
+      id: settings
+      shell: bash
+      env:
+        PROVISIONGUARD_CONFIG: ${{ inputs.config }}
+        PROVISIONGUARD_SCANNERS: ${{ inputs.scanners }}
+      run: echo "scanners=$(python -m provisionguard.config scanners)" >> "$GITHUB_OUTPUT"
+
+    - name: Terraform plan
+      if: steps.changes.outputs.relevant == 'true'
+      shell: bash
+      working-directory: ${{ inputs.terraform-dir }}
+      env:
+        INIT_ARGS: ${{ inputs.terraform-init-args }}
+        PLAN_ARGS: ${{ inputs.terraform-plan-args }}
+      run: |
+        if [[ "$INIT_ARGS" == *"{account_id}"* ]]; then
+          account_id=$(aws sts get-caller-identity --query Account --output text)
+          INIT_ARGS="${INIT_ARGS//\{account_id\}/$account_id}"
+        fi
+        terraform init -input=false $INIT_ARGS
+        terraform plan -input=false -lock=false -out="$RUNNER_TEMP/provisionguard/tfplan" $PLAN_ARGS
+        terraform show -json "$RUNNER_TEMP/provisionguard/tfplan" > "$RUNNER_TEMP/provisionguard/plan.json"
+
+    # Each scanner runs only when chosen. A scanner that fails is reported in the comment; the review still posts.
+    - name: Checkov
+      if: steps.changes.outputs.relevant == 'true' && contains(format(',{0},', steps.settings.outputs.scanners), ',checkov,')
+      continue-on-error: true
+      shell: bash
+      env:
+        TF_DIR: ${{ inputs.terraform-dir }}
+      run: |
+        python -m venv "$RUNNER_TEMP/checkov-venv"   # own environment, so its dependencies can't clash
+        "$RUNNER_TEMP/checkov-venv/bin/pip" install --quiet "checkov>=3,<4"
+        "$RUNNER_TEMP/checkov-venv/bin/checkov" --directory "$TF_DIR" --framework terraform \
+          --output json --quiet --soft-fail > "$RUNNER_TEMP/provisionguard/checkov.json"
+
+    - name: Trivy
+      if: steps.changes.outputs.relevant == 'true' && contains(format(',{0},', steps.settings.outputs.scanners), ',trivy,')
+      continue-on-error: true
+      shell: bash
+      env:
+        TF_DIR: ${{ inputs.terraform-dir }}
+        TRIVY_VERSION: 0.76.1
+      run: |
+        cd "$RUNNER_TEMP"
+        base="https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}"
+        archive="trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+        curl -fsSLO "$base/$archive" && curl -fsSLO "$base/trivy_${TRIVY_VERSION}_checksums.txt"
+        grep " $archive\$" "trivy_${TRIVY_VERSION}_checksums.txt" | sha256sum -c -
+        tar -xzf "$archive" trivy
+        cd "$GITHUB_WORKSPACE"
+        "$RUNNER_TEMP/trivy" config --quiet --format json \
+          --output "$RUNNER_TEMP/provisionguard/trivy.json" "$TF_DIR"
+
+    - name: KICS
+      if: steps.changes.outputs.relevant == 'true' && contains(format(',{0},', steps.settings.outputs.scanners), ',kics,')
+      continue-on-error: true
+      shell: bash
+      env:
+        TF_DIR: ${{ inputs.terraform-dir }}
+      run: |
+        out="$RUNNER_TEMP/provisionguard/kics"
+        mkdir -p "$out" && chmod 777 "$out"
+        docker run --rm -v "$GITHUB_WORKSPACE/$TF_DIR:/path:ro" -v "$out:/out" checkmarx/kics:v2.2.0 \
+          scan --path /path --output-path /out --report-formats json --type Terraform \
+          --no-progress --ignore-on-exit results
+
+    - name: Install Claude Code
+      if: steps.changes.outputs.relevant == 'true' && inputs.claude-code-oauth-token != ''
+      continue-on-error: true # without it the review still posts, minus the AI parts
+      shell: bash
+      run: npm install --global @anthropic-ai/claude-code@2
+
+    - if: steps.changes.outputs.relevant == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: provisionguard-review-inputs
+        path: ${{ runner.temp }}/provisionguard/
+        if-no-files-found: ignore
+
+    - name: Review
+      if: steps.changes.outputs.relevant == 'true'
+      id: review
+      shell: bash
+      env:
+        TF_DIR: ${{ inputs.terraform-dir }}
+        AWS_REGION: ${{ inputs.aws-region }}
+        PROVISIONGUARD_CONFIG: ${{ inputs.config }}
+        PROVISIONGUARD_SCANNERS: ${{ inputs.scanners }}
+        CHECKOV_RESULTS: ${{ runner.temp }}/provisionguard/checkov.json
+        TRIVY_RESULTS: ${{ runner.temp }}/provisionguard/trivy.json
+        KICS_RESULTS: ${{ runner.temp }}/provisionguard/kics/results.json
+        AI_PROVIDER: ${{ inputs.claude-code-oauth-token != '' && 'claude-code' || 'none' }}
+        CLAUDE_CODE_OAUTH_TOKEN: ${{ inputs.claude-code-oauth-token }}
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      run: |
+        # Outside a pull request there is nothing to comment on, so the review goes to the log.
+        if [ -z "$PR_NUMBER" ]; then dry_run=--dry-run; fi
+        python -m provisionguard.main --plan "$RUNNER_TEMP/provisionguard/plan.json" $dry_run
+
+    - name: Apply fail-on
+      if: steps.changes.outputs.relevant == 'true' && inputs.fail-on != 'never'
+      shell: bash
+      env:
+        FAIL_ON: ${{ inputs.fail-on }}
+        VERDICT: ${{ steps.review.outputs.verdict }}
+      run: |
+        case "$FAIL_ON:$VERDICT" in
+          caution:caution|warning:caution|warning:warning)
+            echo "::error::ProvisionGuard verdict is '$VERDICT' (fail-on: $FAIL_ON)"; exit 1 ;;
+        esac
