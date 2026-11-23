@@ -10,10 +10,17 @@ permissions:
 
 jobs:
   unit:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false # one Python version failing shouldn't cancel the other
       matrix:
-        python-version: ["3.9", "3.12"]
+        include:
+          # Oldest supported Python; newer runner images (Ubuntu 26.04+) no longer offer 3.9.
+          - python-version: "3.9"
+            os: ubuntu-24.04
+          # The version the action itself runs on.
+          - python-version: "3.12"
+            os: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
