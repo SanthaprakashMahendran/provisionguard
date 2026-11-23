@@ -15,7 +15,11 @@ Every push to the PR updates the same comment. The action only **reads** from AW
 
 ## Quick start
 
-**1. Let GitHub Actions log in to AWS (once per AWS account).** In IAM, add the identity provider `token.actions.githubusercontent.com` (audience `sts.amazonaws.com`) if it doesn't exist yet, then create a role with `ReadOnlyAccess` and this trust policy:
+**1. Let GitHub Actions log in to AWS (once per AWS account).** In the IAM console:
+
+1. **Identity provider:** skip this if *Identity providers* already lists `token.actions.githubusercontent.com`. Otherwise choose *Add provider* → *OpenID Connect*, with provider URL `https://token.actions.githubusercontent.com` and audience `sts.amazonaws.com`.
+2. **Role:** *Roles* → *Create role* → *Web identity*. Pick the provider above, audience `sts.amazonaws.com`, and your GitHub organization and repository. Attach `ReadOnlyAccess`, name the role (e.g. `provisionguard-ci`) and create it.
+3. **Trust policy:** the console builds a `sub` condition without GitHub's numeric IDs, so the login would be refused. Open the role → *Trust relationships* → *Edit trust policy*, and replace it with:
 
 ```json
 {
@@ -34,7 +38,17 @@ Every push to the PR updates the same comment. The action only **reads** from AW
 }
 ```
 
-GitHub puts numeric IDs into `sub`. Find them with `GET https://api.github.com/repos/<OWNER>/<REPO>` (`owner.id` and `id`).
+`<OWNER_ID>` and `<REPO_ID>` are GitHub's numeric IDs for the owner and the repository:
+
+```bash
+gh api repos/<OWNER>/<REPO> --jq '.owner.id, .id'
+```
+
+For a public repository, opening `https://api.github.com/repos/<OWNER>/<REPO>` in a browser shows them too (`owner.id` and `id`); for a private one it returns "Not Found" without a token.
+
+If the workflow later fails at *Configure AWS credentials* with "Not authorized to perform sts:AssumeRoleWithWebIdentity", the `sub` doesn't match what GitHub sends. Repositories whose token has no numeric IDs use `repo:<OWNER>/<REPO>:pull_request`.
+
+If your AWS account runs an automated cleanup that deletes untagged resources, give the identity provider, the role and the state bucket (see [Existing-infrastructure checks](#existing-infrastructure-checks)) the tag it exempts.
 
 **2. Add repository secrets:** `AWS_ROLE_ARN` (the role's ARN) and, optionally, `CLAUDE_CODE_OAUTH_TOKEN` (run `claude setup-token` with a Claude Pro or Max account) for the AI assessment and the diagram.
 
@@ -115,7 +129,21 @@ Copy a default as a starting point. Right-sizing caps each environment's size (f
 
 ## Existing-infrastructure checks
 
-Name clashes work in any repository. Destructive changes need Terraform state the plan can read, e.g. an S3 backend:
+Name clashes work in any repository. Destructive changes need Terraform state the plan can read, e.g. in S3:
+
+1. **Bucket:** create a general-purpose S3 bucket with *Block all public access* on and *Bucket versioning* enabled, so an overwritten state file can be restored. `ReadOnlyAccess` already lets the role read it.
+2. **Backend in the code**, without the bucket name, so the same code works in every account:
+
+```hcl
+terraform {
+  backend "s3" {
+    key     = "infra/terraform.tfstate"
+    encrypt = true
+  }
+}
+```
+
+3. **Bucket name in the workflow:**
 
 ```yaml
           terraform-init-args: >-
